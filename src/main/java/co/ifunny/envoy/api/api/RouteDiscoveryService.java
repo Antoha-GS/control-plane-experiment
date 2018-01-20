@@ -1,20 +1,22 @@
 package co.ifunny.envoy.api.api;
 
+import com.google.protobuf.Any;
+import com.google.protobuf.InvalidProtocolBufferException;
+import com.google.protobuf.util.JsonFormat;
+import com.google.protobuf.util.JsonFormat.TypeRegistry;
 import com.orbitz.consul.CatalogClient;
 import com.orbitz.consul.KeyValueClient;
 import envoy.api.v2.Discovery.DiscoveryRequest;
 import envoy.api.v2.Discovery.DiscoveryResponse;
+import envoy.api.v2.Rds;
+import envoy.api.v2.Rds.Route;
+import envoy.api.v2.Rds.RouteConfiguration;
 import envoy.api.v2.RouteDiscoveryServiceGrpc;
-import io.grpc.MethodDescriptor;
-import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.atomic.AtomicLong;
-
-import static envoy.api.v2.RouteDiscoveryServiceGrpc.METHOD_FETCH_ROUTES;
-import static envoy.api.v2.RouteDiscoveryServiceGrpc.METHOD_STREAM_ROUTES;
 
 public class RouteDiscoveryService extends RouteDiscoveryServiceGrpc.RouteDiscoveryServiceImplBase {
 
@@ -35,11 +37,7 @@ public class RouteDiscoveryService extends RouteDiscoveryServiceGrpc.RouteDiscov
         return new StreamObserver<DiscoveryRequest>() {
             @Override
             public void onNext(DiscoveryRequest request) {
-                logRequest(request, METHOD_STREAM_ROUTES);
-
-                responseObserver.onError(Status.UNIMPLEMENTED
-                        .withDescription(String.format("Method %s is unimplemented", METHOD_STREAM_ROUTES.getFullMethodName()))
-                        .asException());
+                responseObserver.onNext(buildRoutesResponse(request));
             }
 
             @Override
@@ -56,11 +54,54 @@ public class RouteDiscoveryService extends RouteDiscoveryServiceGrpc.RouteDiscov
 
     @Override
     public void fetchRoutes(DiscoveryRequest request, StreamObserver<DiscoveryResponse> responseObserver) {
-        logRequest(request, METHOD_FETCH_ROUTES);
-        super.fetchRoutes(request, responseObserver);
+        responseObserver.onNext(buildRoutesResponse(request));
+        responseObserver.onCompleted();
+        //responseObserver.onError(Status.UNIMPLEMENTED.withDescription("Method is unimplemented").asException());
     }
 
-    private void logRequest(DiscoveryRequest request, MethodDescriptor<DiscoveryRequest, DiscoveryResponse> methodDescriptor) {
-        logger.info("[{}] {}", methodDescriptor.getFullMethodName(), request);
+    private DiscoveryResponse buildRoutesResponse(DiscoveryRequest request) {
+        try {
+            logger.info("Request: {}", JsonFormat.printer().print(request));
+        } catch (InvalidProtocolBufferException e) {
+            logger.error("Failed to print Request", e);
+        }
+
+        final String typeUrl = request.getTypeUrl();
+        final String routeName = "route";
+        final String virtualHostName = "subscriptions";
+        final String virtualHost = "subscriptions";
+        final String clusterName = "cluster";
+
+        RouteConfiguration routeConfiguration = RouteConfiguration.newBuilder()
+                .setName(routeName)
+                .addVirtualHosts(Rds.VirtualHost.newBuilder()
+                    .setName(virtualHostName)
+                    .addDomains(virtualHost)
+                    .addRoutes(Route.newBuilder()
+                        .setMatch(Rds.RouteMatch.newBuilder()
+                            .addHeaders(Rds.HeaderMatcher.newBuilder()
+                                .setName("content-type")
+                                .setValue("application/grpc")))
+                        .setRoute(Rds.RouteAction.newBuilder()
+                            .setCluster(clusterName))))
+                .build();
+
+        DiscoveryResponse response = DiscoveryResponse.newBuilder()
+                .setTypeUrl(typeUrl)
+                .setVersionInfo("0")
+                .setCanary(false)
+                .setNonce(String.valueOf(streamNonce.incrementAndGet()))
+                .addResources(Any.pack(routeConfiguration))
+                .build();
+
+        try {
+            logger.info("Response: {}", JsonFormat.printer()
+                    .usingTypeRegistry(TypeRegistry.newBuilder().add(RouteConfiguration.getDescriptor()).build())
+                    .print(response));
+        } catch (InvalidProtocolBufferException e) {
+            logger.error("Failed to print Response", e);
+        }
+
+        return response;
     }
 }

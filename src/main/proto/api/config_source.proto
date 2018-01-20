@@ -34,7 +34,7 @@ message ApiConfigSource {
   //
   //  The cluster with name ``cluster_name`` must be statically defined and its
   //  type must not be ``EDS``.
-  repeated string cluster_names = 2;
+  repeated string cluster_name = 2;
 
   // Multiple gRPC services be provided for GRPC. If > 1 cluster is defined,
   // services will be cycled through if any kind of failure occurs.

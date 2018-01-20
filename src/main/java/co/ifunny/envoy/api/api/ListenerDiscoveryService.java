@@ -1,25 +1,41 @@
 package co.ifunny.envoy.api.api;
 
+import com.google.protobuf.Any;
+import com.google.protobuf.InvalidProtocolBufferException;
+import com.google.protobuf.util.JsonFormat;
+import com.google.protobuf.util.JsonFormat.TypeRegistry;
 import com.orbitz.consul.CatalogClient;
 import com.orbitz.consul.KeyValueClient;
+import envoy.api.v2.AddressOuterClass.Address;
+import envoy.api.v2.AddressOuterClass.SocketAddress;
+import envoy.api.v2.ConfigSourceOuterClass.ApiConfigSource;
+import envoy.api.v2.ConfigSourceOuterClass.ApiConfigSource.ApiType;
+import envoy.api.v2.ConfigSourceOuterClass.ConfigSource;
 import envoy.api.v2.Discovery.DiscoveryRequest;
 import envoy.api.v2.Discovery.DiscoveryResponse;
+import envoy.api.v2.Lds.Filter;
+import envoy.api.v2.Lds.FilterChain;
+import envoy.api.v2.Lds.Listener;
 import envoy.api.v2.ListenerDiscoveryServiceGrpc;
-import io.grpc.MethodDescriptor;
-import io.grpc.Status;
+import envoy.api.v2.filter.network.HttpConnectionManagerOuterClass.HttpConnectionManager;
+import envoy.api.v2.filter.network.HttpConnectionManagerOuterClass.HttpConnectionManager.CodecType;
+import envoy.api.v2.filter.network.HttpConnectionManagerOuterClass.HttpFilter;
+import envoy.api.v2.filter.network.HttpConnectionManagerOuterClass.Rds;
 import io.grpc.stub.StreamObserver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.atomic.AtomicLong;
 
-import static envoy.api.v2.ListenerDiscoveryServiceGrpc.METHOD_FETCH_LISTENERS;
-import static envoy.api.v2.ListenerDiscoveryServiceGrpc.METHOD_STREAM_LISTENERS;
+import static co.ifunny.envoy.api.util.Protobuf.messageToStruct;
 
 public class ListenerDiscoveryService extends ListenerDiscoveryServiceGrpc.ListenerDiscoveryServiceImplBase {
 
     final private static Logger logger = LoggerFactory.getLogger(ListenerDiscoveryService.class);
 
+    final private static String ENVOY_HTTP_FILTER_NAME = "envoy.http_connection_manager";
+    final private static String XDS_CLUSTER_NAME = "xds_cluster";
+    final private static String ROUTER_NAME = "envoy.router";
     final private static AtomicLong streamNonce = new AtomicLong();
 
     final private CatalogClient consulCatalog;
@@ -35,11 +51,7 @@ public class ListenerDiscoveryService extends ListenerDiscoveryServiceGrpc.Liste
         return new StreamObserver<DiscoveryRequest>() {
             @Override
             public void onNext(DiscoveryRequest request) {
-                logRequest(request, METHOD_STREAM_LISTENERS);
-
-                responseObserver.onError(Status.UNIMPLEMENTED
-                        .withDescription(String.format("Method %s is unimplemented", METHOD_STREAM_LISTENERS.getFullMethodName()))
-                        .asException());
+                responseObserver.onNext(buildListenersResponse(request));
             }
 
             @Override
@@ -56,11 +68,66 @@ public class ListenerDiscoveryService extends ListenerDiscoveryServiceGrpc.Liste
 
     @Override
     public void fetchListeners(DiscoveryRequest request, StreamObserver<DiscoveryResponse> responseObserver) {
-        logRequest(request, METHOD_FETCH_LISTENERS);
-        super.fetchListeners(request, responseObserver);
+        responseObserver.onNext(buildListenersResponse(request));
+        responseObserver.onCompleted();
+        //responseObserver.onError(Status.UNIMPLEMENTED.withDescription("Method is unimplemented").asException());
     }
 
-    private void logRequest(DiscoveryRequest request, MethodDescriptor<DiscoveryRequest, DiscoveryResponse> methodDescriptor) {
-        logger.info("[{}] {}", methodDescriptor.getFullMethodName(), request);
+    private DiscoveryResponse buildListenersResponse(DiscoveryRequest request) {
+        try {
+            logger.info("Request: {}", JsonFormat.printer().print(request));
+        } catch (InvalidProtocolBufferException e) {
+            logger.error("Failed to print Request", e);
+        }
+
+        final String typeUrl = request.getTypeUrl();
+        final String listenerName = "listener";
+        final String versionInfo = "0";
+        final String ingressHttpStatPrefix = "ingress_http";
+        final String ingressListenerHost = "0.0.0.0";
+        final int ingressListenerPort = 9090;
+
+        HttpConnectionManager httpConnectionManager = HttpConnectionManager.newBuilder()
+                .setStatPrefix(ingressHttpStatPrefix)
+                .setCodecType(CodecType.HTTP2)
+                .setRds(Rds.newBuilder()
+                        .setRouteConfigName("local_route")
+                        .setConfigSource(ConfigSource.newBuilder()
+                                .setApiConfigSource(ApiConfigSource.newBuilder()
+                                        .setApiType(ApiType.GRPC)
+                                        .addClusterName(XDS_CLUSTER_NAME))))
+                .addHttpFilters(HttpFilter.newBuilder().setName(ROUTER_NAME))
+                .build();
+
+        Listener listener = Listener.newBuilder()
+                .setName(listenerName)
+                .setAddress(Address.newBuilder()
+                        .setSocketAddress(SocketAddress.newBuilder()
+                                .setProtocol(SocketAddress.Protocol.TCP)
+                                .setAddress(ingressListenerHost)
+                                .setPortValue(ingressListenerPort)))
+                .addFilterChains(FilterChain.newBuilder()
+                        .addFilters(Filter.newBuilder()
+                                .setName(ENVOY_HTTP_FILTER_NAME)
+                                .setConfig(messageToStruct(httpConnectionManager))))
+                .build();
+
+        DiscoveryResponse response = DiscoveryResponse.newBuilder()
+                .setTypeUrl(typeUrl)
+                .setVersionInfo(versionInfo)
+                .setCanary(false)
+                .setNonce(String.valueOf(streamNonce.incrementAndGet()))
+                .addResources(Any.pack(listener))
+                .build();
+
+        try {
+            logger.info("Response: {}", JsonFormat.printer()
+                    .usingTypeRegistry(TypeRegistry.newBuilder().add(Listener.getDescriptor()).build())
+                    .print(response));
+        } catch (InvalidProtocolBufferException e) {
+            logger.error("Failed to print Response", e);
+        }
+
+        return response;
     }
 }
